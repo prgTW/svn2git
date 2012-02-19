@@ -5,5 +5,7 @@ USAGE
 OPTIONS
 -------
 `-d path|--destination-dir path`	Path to dir where to store created GIT repos
+
 `-r file|--repos-file file`	Path to text file containing a list of SVN repos
+
 `-h | --help`	Help
