@@ -1,3 +1,6 @@
+## REQUIREMENTS
+* nano
+
 ### USAGE
 `/usr/local/bin/svn2git --repos-file file --destination-dir path`
 
