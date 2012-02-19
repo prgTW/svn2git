@@ -1,0 +1,158 @@
+#!/bin/bash
+
+usage() {
+cat <<EOM
+Converts SVN repository into GIT repository
+Copyrights by Tomasz Wójcik (c)2012
+
+USAGE:
+$0 --repos-file file --destination-dir path
+
+OPTIONS:
+	-d path|--destination-dir path	-	Path to dir where to store
+						created GIT repos
+	-r file|--repos-file file	-	Path to text file containing a
+						list of SVN repos
+	-h | --help			-	Help
+EOM
+}
+
+fullpath() {
+	curDir=`pwd`
+	cd $1
+	echo `pwd`
+	cd $curDir
+}
+
+args=`getopt -o "hr:d:" -l "repos-file:,destination-dir:,help" -n $0 -- "$@"`
+if [ $? != 0 ] ; then
+	usage
+	exit 1
+fi
+
+eval set -- "$args"
+
+reposFile=""
+destinationDir=""
+while true ; do
+	case "$1" in
+		-d|--destination-dir):
+			destinationDir="$2"
+			shift 2
+			;;
+		-r|--repos-file):
+			reposFile="$2"
+			shift 2
+			;;
+		-h|--help):
+			usage
+			exit
+			;;
+		--)
+			shift
+			break
+			;;
+		*)
+			echo Internal error!
+			exit 2
+			;;
+	esac
+done
+
+[[ -z "$reposFile" ]] && usage && exit
+
+# get authors
+authorsFile=`mktemp`
+tempAuthorsFile=`mktemp`
+while read line
+do
+	name=`echo $line | awk '{print $1}'`
+	url=`echo $line | awk '{print $2}'`
+	if [[ $url == '' ]]; then
+		url=$name
+		name=`basename $url`
+	fi
+	echo "Processing \"$name\" repository @ $url ..." >&2
+	echo -n "  " >&2
+	svn log --trust-server-cert --non-interactive -q $url | awk -F '|' '/^r/ {sub("^ ", "", $2); sub(" $", "", $2); print $2" = "$2" <"$2">"}' | sort -u >> $tempAuthorsFile
+	echo "Done." >&2
+done < $reposFile
+cat $tempAuthorsFile | sort -u > $authorsFile
+unlink $tempAuthorsFile
+
+# edit authors file
+nano $authorsFile
+
+# init
+pwd=`pwd`
+mkdir -p $destinationDir
+destinationDir=`fullpath $destinationDir`
+
+# convert repos
+while read line
+do
+	tempRepo=`mktemp -d`
+
+	name=`echo $line | awk '{print $1}'`
+	url=`echo $line | awk '{print $2}'`
+	if [[ $url == '' ]]; then
+		url=$name
+		name=`basename $url`
+	fi
+
+	# process each SVN repo
+	echo "Processing \"$name\" repository @ $url ..." >&2
+
+	# Init the final bare repository.
+	echo "- Conversion started at $(date +"%F %T")"
+	mkdir $destinationDir/$name.git
+	cd $destinationDir/$name.git
+	git init --bare
+	git symbolic-ref HEAD refs/heads/trunk
+
+	# Clone the original Subversion repository to a temp repository.
+	cd $pwd
+	echo "- Cloning repository ..."
+	git svn clone $url -A $authorsFile --stdlayout --quiet $tempRepo --no-metadata
+
+	# Create .gitignore file.
+	cd $tempRepo
+	git svn show-ignore --id trunk >> .gitignore
+	git add .gitignore
+	git commit --author="svn2git <tomasz.prgtw.wojcik@gmail.com>" -m 'Convert svn:ignore properties to .gitignore.'
+
+	# Push to final bare repository and remove temp repository.
+	echo "- Pushing to new bare repository..."
+	git remote add bare $destinationDir/$name.git
+	git config remote.bare.push 'refs/remotes/*:refs/heads/*'
+	git push bare
+
+	# Push the .gitignore commit that resides on master.
+	git push bare master:trunk
+	cd $pwd
+	rm -r $tempRepo
+
+	# Rename Subversion's "trunk" branch to Git's standard "master" branch.
+	cd $destinationDir/$name.git
+	git branch -m trunk master
+
+	# Remove bogus branches of the form "name@REV".
+	git for-each-ref --format='%(refname)' refs/heads | grep '@[0-9][0-9]*' | cut -d / -f 3- |
+	while read ref
+	do
+		git branch -D "$ref"
+	done
+
+	# Convert git-svn tag branches to proper tags.
+	echo "- Converting svn tag directories to proper git tags..." >&2
+	git for-each-ref --format='%(refname)' refs/heads/tags | cut -d / -f 4 |
+	while read ref
+	do
+		git tag -a "$ref" -m "Convert \"$ref\" to a proper git tag." "refs/heads/tags/$ref"
+		git branch -D "tags/$ref"
+	done
+
+	echo "- Conversion completed at $(date +"%F %T")"
+done < $reposFile
+
+unlink $authorsFile
